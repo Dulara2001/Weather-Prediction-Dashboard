@@ -1,54 +1,145 @@
 import streamlit as st
+import pandas as pd
+import requests
+from prophet import Prophet
+import plotly.express as px
 from streamlit_folium import st_folium
 import folium
 from folium.plugins import Draw
-import pandas as pd
-import requests
-from shapely.geometry import Polygon
-import numpy as np
-from prophet import Prophet
-from prophet.plot import plot_plotly
-import plotly.graph_objs as go
+from datetime import datetime
+from geopy.geocoders import Nominatim
+import time
 
-# Title
-st.title("🌤️ Weather Prediction Dashboard")
+# Initialize session state
+if "historical_data" not in st.session_state:
+    st.session_state.historical_data = None
+if "forecast_data" not in st.session_state:
+    st.session_state.forecast_data = None
 
-# Initialize Folium map with drawing tools
-m = folium.Map(location=[0, 0], zoom_start=2)
-Draw(export=True, draw_options={"rectangle": True, "polygon": True}).add_to(m)
+# Page configuration
+st.set_page_config(layout="wide")
+st.title("🌦️ Smart Weather Analysis Dashboard")
 
-# Display the map and capture drawn data
-output = st_folium(m, width=700, height=500, key="map")
+# ================= Layout Structure =================
+left_col, right_col = st.columns([1, 1])
 
-# Extract coordinates from the drawn shape
-coordinates = []
-if "all_drawings" in output and output["all_drawings"]:
-    for drawing in output["all_drawings"]:
-        if drawing["geometry"]["type"] == "Polygon":
-            # Get the first polygon's coordinates (simplified)
-            coords = drawing["geometry"]["coordinates"][0]
-            coordinates = [(lat, lon) for lon, lat in coords]  # Folium uses (lat, lon)
+# ================= Left Column (Map + Historical Data) =================
+with left_col:
+    st.subheader("🗺️ Select Area")
+    m = folium.Map(location=[0, 0], zoom_start=2)
+    Draw(export=True, draw_options={"rectangle": True}).add_to(m)
+    map_data = st_folium(m, width=500, height=400)
+    
+    # Historical Data Section
+    if st.session_state.historical_data is not None:
+        st.subheader("📜 Historical Weather Data")
+        
+        # Rename columns for better understanding
+        historical_df = st.session_state.historical_data.rename(columns={
+            "time": "Date",
+            "temperature_2m_max": "Max Temperature (°C)",
+            "precipitation_sum": "Total Precipitation (mm)"
+        })
+        
+        st.dataframe(historical_df, use_container_width=True)
+        
+        # Temperature Chart
+        fig_temp = px.line(
+            historical_df,
+            x="Date",
+            y="Max Temperature (°C)",
+            title="Historical Temperature Trend"
+        )
+        st.plotly_chart(fig_temp, use_container_width=True)
 
-# Show extracted coordinates (optional)
-if coordinates:
-    st.write("Selected Area Coordinates:", coordinates)
+# ================= Right Column (Controls + Forecast) =================
+with right_col:
+    # Show help message until area is selected
+    if not map_data.get("last_active_drawing"):
+        st.subheader("ℹ️ Instructions")
+        st.info("""
+        1. Draw a rectangle on the map
+        2. Select date range below
+        3. Click 'Fetch Historical Data'
+        4. Click 'Predict Next 30 Days'
+        """)
+    
+    # Date Selection
+    st.subheader("📅 Date Range Selection")
+    start_date = st.date_input("Start Date", value=datetime(2023, 1, 1))
+    end_date = st.date_input("End Date", value=datetime(2023, 12, 31))
+    
+    # Location Details Section
+    if map_data.get("last_active_drawing"):
+        st.subheader("📍 Selected Location Details")
+        
+        # Calculate centroid
+        geometry = map_data["last_active_drawing"]["geometry"]
+        coordinates = geometry["coordinates"][0]
+        lats = [coord[1] for coord in coordinates]
+        lons = [coord[0] for coord in coordinates]
+        latitude = sum(lats) / len(lats)
+        longitude = sum(lons) / len(lons)
+        
+        # Display coordinates
+        st.write(f"**Latitude:** {latitude:.4f}")
+        st.write(f"**Longitude:** {longitude:.4f}")
+        
+        # Reverse geocoding for address details
+        try:
+            geolocator = Nominatim(user_agent="weather_dashboard")
+            location = geolocator.reverse(f"{latitude}, {longitude}", exactly_one=True)
+            
+            if location:
+                address = location.raw.get('address', {})
+                st.write("**Address Details:**")
+                st.write(f"📍 {address.get('road', '')} {address.get('house_number', '')}")
+                st.write(f"🏙️ {address.get('city', address.get('town', ''))}")
+                st.write(f"🗺️ {address.get('state', '')}, {address.get('country', '')}")
+                st.write(f"🌐 {address.get('postcode', '')}")
+            else:
+                st.warning("Could not retrieve address details for this location")
+        
+        except Exception as e:
+            st.error(f"Error fetching location details: {str(e)}")
+            st.info("Note: Location details might not be available for remote areas")
+        
+        # Add delay to prevent rate limiting
+        time.sleep(1)
+    
+    # Prediction Section
+    if st.session_state.forecast_data is not None:
+        st.subheader("🔮 Future Weather Forecast")
+        
+        # Rename forecast columns
+        forecast_df = st.session_state.forecast_data.rename(columns={
+            "ds": "Date",
+            "yhat": "Predicted Temperature (°C)",
+            "yhat_lower": "Minimum Estimate",
+            "yhat_upper": "Maximum Estimate"
+        })
+        
+        # Filter only future dates
+        last_historical_date = pd.to_datetime(st.session_state.historical_data["time"].max())
+        future_forecast = forecast_df[forecast_df["Date"] > last_historical_date]
+        
+        st.dataframe(future_forecast[["Date", "Predicted Temperature (°C)", 
+                                    "Minimum Estimate", "Maximum Estimate"]], 
+                    use_container_width=True)
+        
+        # Forecast Visualization
+        fig_forecast = px.line(
+            future_forecast,
+            x="Date",
+            y="Predicted Temperature (°C)",
+            title="30-Day Temperature Forecast",
+            labels={"value": "Temperature (°C)"}
+        ).update_layout(showlegend=False)
+        
+        st.plotly_chart(fig_forecast, use_container_width=True)
 
-    # Convert to a bounding box (min/max lat/lon)
-    lats = [c[0] for c in coordinates]
-    lons = [c[1] for c in coordinates]
-    bbox = {
-        "min_lat": min(lats),
-        "max_lat": max(lats),
-        "min_lon": min(lons),
-        "max_lon": max(lons)
-    }
-    st.write("Bounding Box:", bbox)
-else:
-    st.warning("Draw a polygon/rectangle on the map to select an area!")
-
-# Function to fetch historical weather data
-@st.cache_data
-def fetch_historical_weather(latitude, longitude, start_date, end_date):
+# ================= Common Functions =================
+def fetch_weather_data(latitude, longitude):
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
         "latitude": latitude,
@@ -59,61 +150,47 @@ def fetch_historical_weather(latitude, longitude, start_date, end_date):
         "timezone": "auto"
     }
     response = requests.get(url, params=params)
-    data = response.json()
-    df = pd.DataFrame(data["daily"])
-    return df
+    return pd.DataFrame(response.json()["daily"])
 
-# Date input for historical data
-start_date = st.date_input("Start Date", value=pd.to_datetime("2023-01-01"))
-end_date = st.date_input("End Date", value=pd.to_datetime("2023-12-31"))
-
-# Fetch weather data for the centroid of the drawn area
-if coordinates:
-    # Create a polygon from the coordinates
-    polygon = Polygon(coordinates)
-    centroid = polygon.centroid
-    latitude, longitude = centroid.y, centroid.x  # Shapely uses (x=lon, y=lat)
-
-    st.write(f"Centroid Coordinates: Latitude = {latitude}, Longitude = {longitude}")
-
-    if st.button("Fetch Weather for Centroid"):
-        df = fetch_historical_weather(latitude, longitude, start_date, end_date)
-        st.subheader("Historical Weather Data")
-        st.dataframe(df)
-
-        # Plot temperature
-        st.line_chart(df.set_index("time")["temperature_2m_max"])
-
-        # Prepare data for Prophet
-        df_prophet = df[["time", "temperature_2m_max"]].rename(columns={"time": "ds", "temperature_2m_max": "y"})
-
-        # Train Prophet model
-        model = Prophet()
-        model.fit(df_prophet.dropna())
-
-        # Predict for the next 90 days
-        future = model.make_future_dataframe(periods=90)
-        forecast = model.predict(future)
-
-        # Show forecast
-        st.subheader("Temperature Forecast for the Next 90 Days")
-        st.write(forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]])
-
-        # Plot forecast
-        fig = plot_plotly(model, forecast)
-        st.plotly_chart(fig)
-
-# Fetch weather data for multiple points in the bounding box (optional)
-if coordinates and st.button("Fetch Weather for Entire Area"):
-    # Generate grid points within the bounding box
-    lats = np.linspace(bbox["min_lat"], bbox["max_lat"], num=3)  # 3x3 grid
-    lons = np.linspace(bbox["min_lon"], bbox["max_lon"], num=3)
+# ================= Button Controls =================
+if map_data.get("last_active_drawing"):
+    # Calculate centroid
+    geometry = map_data["last_active_drawing"]["geometry"]
+    coordinates = geometry["coordinates"][0]
+    lats = [coord[1] for coord in coordinates]
+    lons = [coord[0] for coord in coordinates]
+    latitude = sum(lats) / len(lats)
+    longitude = sum(lons) / len(lons)
     
-    # Fetch data for all points and average
-    all_temps = []
-    for lat in lats:
-        for lon in lons:
-            df = fetch_historical_weather(lat, lon, start_date, end_date)
-            all_temps.append(df["temperature_2m_max"].mean())
+    # Buttons at bottom
+    left_col.button("🗓️ Fetch Historical Data", 
+                  on_click=lambda: st.session_state.update({
+                      "historical_data": fetch_weather_data(latitude, longitude),
+                      "forecast_data": None
+                  }))
     
-    st.write("Average Temperature in Area:", np.mean(all_temps))
+    # Modified prediction button
+    if right_col.button("🔮 Predict Next 30 Days"):
+        if st.session_state.historical_data is not None:
+            try:
+                # Prepare data
+                df = (st.session_state.historical_data
+                      .rename(columns={"time": "ds", "temperature_2m_max": "y"})
+                      [["ds", "y"]]
+                     )
+                
+                # Create and fit model
+                model = Prophet()
+                model.fit(df)
+                
+                # Generate future dates
+                future = model.make_future_dataframe(periods=30)
+                
+                # Make predictions
+                forecast = model.predict(future)
+                st.session_state.forecast_data = forecast
+                
+            except Exception as e:
+                st.error(f"Prediction failed: {str(e)}")
+        else:
+            st.warning("Please fetch historical data first!")

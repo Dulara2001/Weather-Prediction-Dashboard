@@ -9,12 +9,7 @@ from folium.plugins import Draw
 from datetime import datetime
 from geopy.geocoders import Nominatim
 import time
-from transformers import pipeline
-import re
-
-
-# Initialize chatbot pipeline 
-qa_pipeline = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
+import google.generativeai as genai
 
 # Initialize session state
 if "historical_data" not in st.session_state:
@@ -23,51 +18,12 @@ if "forecast_temp" not in st.session_state:
     st.session_state.forecast_temp = None
 if "forecast_precip" not in st.session_state:
     st.session_state.forecast_precip = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 # Page configuration
 st.set_page_config(layout="wide")
 st.title("🌦️ Smart Weather Analysis Dashboard")
-
-
-# Add chatbot functions 
-def get_chat_response(question, context):
-    patterns = {
-        r"temperature|how hot|how cold": "temperature_2m_max",
-        r"rain|precipitation": "precipitation_sum",
-        r"wind": "windspeed_10m_max",
-        r"forecast|prediction": "forecast"
-    }
-    
-    for pattern, response_key in patterns.items():
-        if re.search(pattern, question, re.IGNORECASE):
-            return get_data_based_response(response_key)
-    
-    result = qa_pipeline(question=question, context=context)
-    return result['answer']
-
-def get_data_based_response(response_key):
-    """
-    Generate response based on data type
-    """
-    # Check if historical data exists and is not empty
-    if st.session_state.historical_data is None or st.session_state.historical_data.empty:
-        return "Please fetch historical data first!"
-    
-    latest_data = st.session_state.historical_data.iloc[-1]
-    
-    responses = {
-        "temperature_2m_max": f"Latest temperature: {latest_data['temperature_2m_max']}°C",
-        "precipitation_sum": f"Recent precipitation: {latest_data['precipitation_sum']}mm",
-        "windspeed_10m_max": f"Wind speed: {latest_data['windspeed_10m_max']}km/h",
-        # Fixed forecast check
-        "forecast": ("Here's the forecast:" 
-                     if (st.session_state.forecast_temp is not None 
-                         and not st.session_state.forecast_temp.empty) 
-                     else "Generate forecast first!")
-    }
-    
-    return responses.get(response_key, "I can help with temperature, precipitation, wind, and forecasts.")
-
 
 # ================= Layout Structure =================
 left_col, right_col = st.columns([1, 1])
@@ -179,7 +135,6 @@ with right_col:
         
         # Add delay to prevent rate limiting
         time.sleep(1)
-
     
     # Prediction Section
     if st.session_state.forecast_temp is not None and st.session_state.forecast_precip is not None:
@@ -230,46 +185,89 @@ with right_col:
             )
             st.plotly_chart(fig_precip, use_container_width=True)
 
+# ================= Chatbot Section =================
+st.sidebar.title("💬 Weather Chatbot")
 
-    # Add chatbot interface
-    st.subheader("💬 Weather Assistant")
+# Initialize Gemini Pro API
+genai.configure(api_key="Your_Api_key")
 
-    # Initialize chat history
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+def get_data_summary():
+    """Generate a text summary of available data"""
+    summary = []
+    
+    if st.session_state.historical_data is not None:
+        hist_df = st.session_state.historical_data
+        summary.append("Historical Weather Data:")
+        summary.append(f"- Date Range: {hist_df['time'].min()} to {hist_df['time'].max()}")
+        summary.append(f"- Avg Max Temp: {hist_df['temperature_2m_max'].mean():.1f}°C")
+        summary.append(f"- Avg Min Temp: {hist_df['temperature_2m_min'].mean():.1f}°C")
+        summary.append(f"- Total Precipitation: {hist_df['precipitation_sum'].sum()}mm")
+    
+    if st.session_state.forecast_temp is not None:
+        forecast_df = st.session_state.forecast_temp
+        summary.append("\nTemperature Forecast:")
+        summary.append(f"- Predicted Avg Temp: {forecast_df['yhat'].mean():.1f}°C")
+        summary.append(f"- Max Predicted Temp: {forecast_df['yhat'].max():.1f}°C")
+    
+    if st.session_state.forecast_precip is not None:
+        precip_df = st.session_state.forecast_precip
+        summary.append("\nPrecipitation Forecast:")
+        summary.append(f"- Total Predicted Precipitation: {precip_df['yhat'].sum()}mm")
+    
+    return "\n".join(summary) if summary else "No data available"
 
-    # Display chat messages
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+def get_chatbot_response(user_input):
+    data_summary = get_data_summary()
+    
+    prompt = f"""
+    You are a weather data analyst. Use the following data to answer questions.
+    Only use the provided data - don't make up answers.
+    If asked about data that isn't available, say you don't have that information.
+    
+    Current Data Summary:
+    {data_summary}
+    
+    User Question: {user_input}
+    
+    Answer in a clear, concise way using numbers from the data when possible.
+    """
+    
+    try:
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(prompt)
+        print("API Response:", response.text)  # Debugging
+        return response.text
+    except Exception as e:
+        print("API Error:", str(e))  # Debugging
+        return f"Error: {str(e)}"
 
-    # Chat input
-    if prompt := st.chat_input("Ask about weather (e.g., 'What's the temperature?'):"):
-        # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        
-        # Generate context for NLP
-        context = ""
-        if (st.session_state.historical_data is not None 
-            and not st.session_state.historical_data.empty):
-            context = f"""
-            Weather Statistics:
-            - Average Temperature: {st.session_state.historical_data['temperature_2m_max'].mean():.1f}°C
-            - Total Precipitation: {st.session_state.historical_data['precipitation_sum'].sum()}mm
-            - Max Wind Speed: {st.session_state.historical_data['windspeed_10m_max'].max()}km/h
-            """
-        
-        # Get bot response
-        try:
-            response = get_chat_response(prompt, context)
-        except Exception as e:
-            response = f"Sorry, I encountered an error: {str(e)}"
-        
-        # Add bot response to chat history
-        with st.chat_message("assistant"):
-            st.markdown(response)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+# Chatbot UI
+user_input = st.sidebar.text_input("Ask about the weather data (e.g., 'What was the hottest day?')")
 
+if user_input:
+    print("User input received:", user_input)  # Debugging
+    if st.session_state.historical_data is None and "forecast" not in user_input.lower():
+        st.sidebar.warning("Please load historical data first!")
+    else:
+        with st.spinner("Analyzing data..."):
+            try:
+                print("Generating response...")  # Debugging
+                chatbot_response = get_chatbot_response(user_input)
+                print("Response generated:", chatbot_response)  # Debugging
+                st.session_state.chat_history.append({"role": "user", "content": user_input})
+                st.session_state.chat_history.append({"role": "assistant", "content": chatbot_response})
+                print("Chat history updated")  # Debugging
+            except Exception as e:
+                print("Error:", str(e))  # Debugging
+                st.sidebar.error(f"Error generating response: {str(e)}")
+
+# Display chat history
+print("Current Chat History:", st.session_state.chat_history)  # Debugging
+for message in st.session_state.chat_history:
+    if message["role"] == "user":
+        st.sidebar.text_area("You", value=message["content"], height=75, key=f"user_{message['content']}")
+    else:
+        st.sidebar.text_area("Chatbot", value=message["content"], height=100, key=f"assistant_{message['content']}")
 
 # ================= Common Functions =================
 def fetch_weather_data(latitude, longitude):

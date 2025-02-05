@@ -1,5 +1,7 @@
 # 🌦️ Smart Weather Analysis Dashboard
 
+**Demo**: https://drive.google.com/file/d/1WSZyRoDpPAiFGICWjPh8ssmkM_bOyicr/view?usp=sharing
+
 The **Smart Weather Analysis Dashboard** is a comprehensive web application designed to provide historical weather data analysis, future weather predictions, and an interactive chatbot for answering weather-related queries. Built with **Streamlit**, this tool leverages **weather APIs, machine learning models, and natural language processing** to deliver actionable insights and forecasts.
 
 ---

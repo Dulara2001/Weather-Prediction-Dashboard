@@ -9,6 +9,12 @@ from folium.plugins import Draw
 from datetime import datetime
 from geopy.geocoders import Nominatim
 import time
+from transformers import pipeline
+import re
+
+
+# Initialize chatbot pipeline 
+qa_pipeline = pipeline("question-answering", model="distilbert-base-cased-distilled-squad")
 
 # Initialize session state
 if "historical_data" not in st.session_state:
@@ -21,6 +27,47 @@ if "forecast_precip" not in st.session_state:
 # Page configuration
 st.set_page_config(layout="wide")
 st.title("🌦️ Smart Weather Analysis Dashboard")
+
+
+# Add chatbot functions 
+def get_chat_response(question, context):
+    patterns = {
+        r"temperature|how hot|how cold": "temperature_2m_max",
+        r"rain|precipitation": "precipitation_sum",
+        r"wind": "windspeed_10m_max",
+        r"forecast|prediction": "forecast"
+    }
+    
+    for pattern, response_key in patterns.items():
+        if re.search(pattern, question, re.IGNORECASE):
+            return get_data_based_response(response_key)
+    
+    result = qa_pipeline(question=question, context=context)
+    return result['answer']
+
+def get_data_based_response(response_key):
+    """
+    Generate response based on data type
+    """
+    # Check if historical data exists and is not empty
+    if st.session_state.historical_data is None or st.session_state.historical_data.empty:
+        return "Please fetch historical data first!"
+    
+    latest_data = st.session_state.historical_data.iloc[-1]
+    
+    responses = {
+        "temperature_2m_max": f"Latest temperature: {latest_data['temperature_2m_max']}°C",
+        "precipitation_sum": f"Recent precipitation: {latest_data['precipitation_sum']}mm",
+        "windspeed_10m_max": f"Wind speed: {latest_data['windspeed_10m_max']}km/h",
+        # Fixed forecast check
+        "forecast": ("Here's the forecast:" 
+                     if (st.session_state.forecast_temp is not None 
+                         and not st.session_state.forecast_temp.empty) 
+                     else "Generate forecast first!")
+    }
+    
+    return responses.get(response_key, "I can help with temperature, precipitation, wind, and forecasts.")
+
 
 # ================= Layout Structure =================
 left_col, right_col = st.columns([1, 1])
@@ -132,6 +179,7 @@ with right_col:
         
         # Add delay to prevent rate limiting
         time.sleep(1)
+
     
     # Prediction Section
     if st.session_state.forecast_temp is not None and st.session_state.forecast_precip is not None:
@@ -181,6 +229,47 @@ with right_col:
                 title="30-Day Precipitation Forecast"
             )
             st.plotly_chart(fig_precip, use_container_width=True)
+
+
+    # Add chatbot interface
+    st.subheader("💬 Weather Assistant")
+
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # Chat input
+    if prompt := st.chat_input("Ask about weather (e.g., 'What's the temperature?'):"):
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Generate context for NLP
+        context = ""
+        if (st.session_state.historical_data is not None 
+            and not st.session_state.historical_data.empty):
+            context = f"""
+            Weather Statistics:
+            - Average Temperature: {st.session_state.historical_data['temperature_2m_max'].mean():.1f}°C
+            - Total Precipitation: {st.session_state.historical_data['precipitation_sum'].sum()}mm
+            - Max Wind Speed: {st.session_state.historical_data['windspeed_10m_max'].max()}km/h
+            """
+        
+        # Get bot response
+        try:
+            response = get_chat_response(prompt, context)
+        except Exception as e:
+            response = f"Sorry, I encountered an error: {str(e)}"
+        
+        # Add bot response to chat history
+        with st.chat_message("assistant"):
+            st.markdown(response)
+        st.session_state.messages.append({"role": "assistant", "content": response})
+
 
 # ================= Common Functions =================
 def fetch_weather_data(latitude, longitude):
